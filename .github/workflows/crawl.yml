@@ -1,0 +1,51 @@
+name: Etoland Crawler
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # 5분마다 실행
+  workflow_dispatch:        # 필요시 수동 실행
+
+# state 파일을 저장소에 커밋하려면 write 권한이 필요
+permissions:
+  contents: write
+
+concurrency:
+  group: etoland-crawler
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run crawler
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # 선택: 특정 카테고리만 모니터링하고 싶다면 저장소 "Variables"에 추가
+          # ETO_SCA_KO: ${{ vars.ETO_SCA_KO }}
+        run: |
+          python -u main.py
+
+      - name: Commit state if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if [ -n "$(git status --porcelain)" ]; then
+            git add -A
+            git commit -m "chore(state): update last_id [skip ci]"
+            git push
+          else
+            echo "No state changes."
+          fi
