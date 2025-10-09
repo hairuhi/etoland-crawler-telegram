@@ -3,9 +3,9 @@ name: Etoland Crawler
 on:
   schedule:
     - cron: "*/5 * * * *"   # 5분마다 실행
-  workflow_dispatch:        # 필요시 수동 실행
+  workflow_dispatch:        # 수동 실행도 가능
 
-# state 파일을 저장소에 커밋하려면 write 권한이 필요
+# state 파일을 저장소에 커밋하려면 write 권한 필요
 permissions:
   contents: write
 
@@ -26,15 +26,17 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install deps
+      - name: Install dependencies
         run: pip install -r requirements.txt
 
       - name: Run crawler
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          # 선택: 특정 카테고리만 모니터링하고 싶다면 저장소 "Variables"에 추가
+          # (옵션) 특정 카테고리만 모니터링하려면 저장소 Settings → Variables에 ETO_SCA_KO 추가
           # ETO_SCA_KO: ${{ vars.ETO_SCA_KO }}
+          # (옵션) 하트비트 테스트를 켜려면 저장소 Variables에 ENABLE_HEARTBEAT=1 추가
+          # ENABLE_HEARTBEAT: ${{ vars.ENABLE_HEARTBEAT }}
         run: |
           python -u main.py
 
