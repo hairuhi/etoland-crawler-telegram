@@ -7,31 +7,29 @@ from urllib.parse import urljoin, urlparse, parse_qs, quote
 import requests
 from bs4 import BeautifulSoup
 
-# ========= 환경 변수 =========
+# ========= 텔레그램 환경 변수 =========
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# [요청사항 반영] 유머게시판은 "약후"만 전송 (기본값을 '약후'로 고정)
-TARGET_BOARD = "etohumor07"
-BASE_LIST_URL = f"https://www.etoland.co.kr/bbs/board.php?bo_table={TARGET_BOARD}"
-ETO_SCA_KO = (os.getenv("ETO_SCA_KO") or "약후").strip()  # ← 기본 '약후'
+# ========= 모니터링 대상 (요청사항 반영) =========
+# 1) 유머게시판: '약후' 카테고리만 전송 (코드에 고정)
+TARGET_BOARD_HUMOR = "etohumor07"
+HUMOR_SCA_FIXED = "약후"
+BASE_HUMOR_URL = f"https://www.etoland.co.kr/bbs/board.php?bo_table={TARGET_BOARD_HUMOR}"
 
-# 인기글: 전부 전송 (기본 전체 허용 '*')
-MONITOR_HIT = os.getenv("MONITOR_HIT", "1").strip() == "1"
-HIT_URL = "https://www.etoland.co.kr/bbs/hit.php"
-HIT_FILTER_BO_TABLES = os.getenv("HIT_FILTER_BO_TABLES", "*").strip()  # ← 기본 '*': 전부 허용
+# 2) 연예인 게시판: 카테고리 없이 전체 전송
+TARGET_BOARD_STAR = "star02"
+BASE_STAR_URL = f"https://www.etoland.co.kr/bbs/board.php?bo_table={TARGET_BOARD_STAR}"
 
-# 재전송 방지(게시판/글번호 단위로 기록)
-SEEN_SET_FILE = os.getenv("SEEN_SET_FILE", "state/seen_ids.txt")
-
-# 하트비트(테스트용)
+# ========= 상태/테스트 설정 =========
+SEEN_SET_FILE = os.getenv("SEEN_SET_FILE", "state/seen_ids.txt")  # bo_table:wr_id 형식으로 기록
 ENABLE_HEARTBEAT = os.getenv("ENABLE_HEARTBEAT", "0").strip() == "1"
 HEARTBEAT_TEXT = os.getenv("HEARTBEAT_TEXT", "🧪 Heartbeat: 워크플로우는 정상 동작 중입니다.")
 
 # ========= HTTP 세션 공통 =========
 SESSION = requests.Session()
 SESSION.headers.update({
-    "User-Agent": "Mozilla/5.0 (compatible; EtolandCrawler/1.2; +https://github.com/your/repo)",
+    "User-Agent": "Mozilla/5.0 (compatible; EtolandCrawler/2.0; +https://github.com/your/repo)",
     "Accept-Language": "ko,ko-KR;q=0.9,en;q=0.8",
     "Referer": "https://www.etoland.co.kr/",
     "Connection": "close",
@@ -70,11 +68,6 @@ def euckr_quote(s: str) -> str:
         return quote(s.encode("euc-kr"))
     except Exception:
         return quote(s)
-
-def build_list_url() -> str:
-    # 반드시 sca=약후(또는 변수값) 파라미터를 달아 목록을 제한
-    sca = ETO_SCA_KO or "약후"
-    return f"{BASE_LIST_URL}&sca={euckr_quote(sca)}"
 
 def get_encoding_safe_text(resp: requests.Response) -> str:
     if not resp.encoding or resp.encoding.lower() in ("iso-8859-1", "ansi_x3.4-1968"):
@@ -115,9 +108,9 @@ def absolutize(base: str, url: str) -> str:
     return urljoin(base, url)
 
 # ========= 목록/본문 파싱 =========
-def fetch_list_from_board() -> list[dict]:
-    """유머게시판 목록 (약후만)"""
-    url = build_list_url()
+def fetch_humor_약후_list() -> list[dict]:
+    """유머게시판 '약후' 카테고리 전용 목록"""
+    url = f"{BASE_HUMOR_URL}&sca={euckr_quote(HUMOR_SCA_FIXED)}"
     r = SESSION.get(url, timeout=TIMEOUT)
     html = get_encoding_safe_text(r)
     soup = BeautifulSoup(html, "html.parser")
@@ -125,10 +118,7 @@ def fetch_list_from_board() -> list[dict]:
     posts = {}
     for a in soup.find_all("a", href=True):
         bo, wr = extract_bo_and_id(a["href"])
-        if not bo or not wr:
-            continue
-        # 유머게시판만
-        if bo != TARGET_BOARD:
+        if bo != TARGET_BOARD_HUMOR or not wr:
             continue
         title = a.get_text(strip=True) or f"[{bo}] 글번호 {wr}"
         link = absolutize(url, a["href"])
@@ -137,40 +127,29 @@ def fetch_list_from_board() -> list[dict]:
             posts[key] = {"bo_table": bo, "wr_id": wr, "title": title, "url": link}
 
     res = sorted(posts.values(), key=lambda x: x["wr_id"], reverse=True)
-    print(f"[debug] board list fetched (sca={ETO_SCA_KO or '약후'}): {len(res)} items")
+    print(f"[debug] humor(약후) list fetched: {len(res)} items")
     return res
 
-def _allowed_bo_in_hit(bo: str) -> bool:
-    if HIT_FILTER_BO_TABLES == "*":
-        return True
-    allow = {b.strip().lower() for b in HIT_FILTER_BO_TABLES.split(",") if b.strip()}
-    return bo.lower() in allow
-
-def fetch_list_from_hit() -> list[dict]:
-    """인기글 목록 (전부 허용: 기본 '*')"""
-    if not MONITOR_HIT:
-        return []
-
-    r = SESSION.get(HIT_URL, timeout=TIMEOUT)
+def fetch_star_list() -> list[dict]:
+    """연예인 게시판 전체 목록"""
+    url = BASE_STAR_URL
+    r = SESSION.get(url, timeout=TIMEOUT)
     html = get_encoding_safe_text(r)
     soup = BeautifulSoup(html, "html.parser")
 
     posts = {}
     for a in soup.find_all("a", href=True):
         bo, wr = extract_bo_and_id(a["href"])
-        if not bo or not wr:
+        if bo != TARGET_BOARD_STAR or not wr:
             continue
-        if not _allowed_bo_in_hit(bo):
-            continue
-
         title = a.get_text(strip=True) or f"[{bo}] 글번호 {wr}"
-        link = absolutize(HIT_URL, a["href"])
+        link = absolutize(url, a["href"])
         key = (bo, wr)
         if key not in posts or (title and len(title) > len(posts[key]["title"])):
             posts[key] = {"bo_table": bo, "wr_id": wr, "title": title, "url": link}
 
-    res = sorted(posts.values(), key=lambda x: (x["bo_table"], x["wr_id"]), reverse=True)
-    print(f"[debug] hit list fetched: {len(res)} items (allowed={HIT_FILTER_BO_TABLES})")
+    res = sorted(posts.values(), key=lambda x: x["wr_id"], reverse=True)
+    print(f"[debug] star list fetched: {len(res)} items")
     return res
 
 def fetch_content_media(post_url: str) -> dict:
@@ -251,15 +230,13 @@ def process():
     if ENABLE_HEARTBEAT:
         tg_send_text(HEARTBEAT_TEXT)
 
-    # 1) 유머게시판(약후 전용) 목록
-    posts_board = fetch_list_from_board()
+    # 1) 유머(약후) + 2) 연예인 목록 가져오기
+    posts_humor = fetch_humor_약후_list()
+    posts_star  = fetch_star_list()
 
-    # 2) 인기글 목록(전부 허용 또는 필터)
-    posts_hit = fetch_list_from_hit()
-
-    # 병합 & dedup: (bo_table, wr_id) 기준
+    # 병합 & dedup
     merged = {}
-    for p in posts_board + posts_hit:
+    for p in posts_humor + posts_star:
         key = (p["bo_table"], p["wr_id"])
         if key not in merged:
             merged[key] = p
@@ -310,7 +287,7 @@ def process():
             tg_send_text(header)
 
         sent_keys.append(f"{bo}:{wr}")
-        time.sleep(1)
+        time.sleep(1)  # 예절상 대기
 
     append_seen(sent_keys)
     print(f"[info] appended {len(sent_keys)} new keys to seen set")
