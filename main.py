@@ -14,7 +14,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 # 모니터링 대상 (기본: 유머게시판 전체)
 # 특정 카테고리(예: '약후')만 보고 싶다면 ETO_SCA_KO="약후" 로 설정
 BASE_LIST_URL = "https://www.etoland.co.kr/bbs/board.php?bo_table=etohumor07"
-ETO_SCA_KO = os.getenv("ETO_SCA_KO"약후"", "").strip()
+ETO_SCA_KO = os.getenv("ETO_SCA_KO", "").strip()
 
 # 상태 파일 (가장 최근 전송한 wr_id 저장 → 재전송 방지)
 STATE_FILE = os.getenv("STATE_FILE", "state/last_id.txt")
@@ -232,4 +232,5 @@ def process():
 
 if __name__ == "__main__":
     process()
+
 
