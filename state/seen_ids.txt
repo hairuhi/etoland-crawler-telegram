@@ -40,3 +40,5 @@ freebbs:3121745
 freebbs:3121777
 freebbs:3121785
 freebbs:3121800
+etohumor07:2156733
+freebbs:3121808
