@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import time
 import pathlib
 from urllib.parse import urljoin, urlparse, parse_qs, quote
@@ -11,25 +12,25 @@ from bs4 import BeautifulSoup
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# ========= 모니터링 대상 (요청사항 반영) =========
-# 1) 유머게시판: '약후' 카테고리만 전송 (코드에 고정)
+# ========= 모니터링 대상 =========
+# 1) 유머게시판: '약후' 카테고리만 (코드 고정)
 TARGET_BOARD_HUMOR = "etohumor07"
 HUMOR_SCA_FIXED = "약후"
 BASE_HUMOR_URL = f"https://www.etoland.co.kr/bbs/board.php?bo_table={TARGET_BOARD_HUMOR}"
 
-# 2) 연예인 게시판: 카테고리 없이 전체 전송
+# 2) 연예인 게시판: 전체
 TARGET_BOARD_STAR = "star02"
 BASE_STAR_URL = f"https://www.etoland.co.kr/bbs/board.php?bo_table={TARGET_BOARD_STAR}"
 
 # ========= 상태/테스트 설정 =========
-SEEN_SET_FILE = os.getenv("SEEN_SET_FILE", "state/seen_ids.txt")  # bo_table:wr_id 형식으로 기록
+SEEN_SET_FILE = os.getenv("SEEN_SET_FILE", "state/seen_ids.txt")  # bo_table:wr_id 기록
 ENABLE_HEARTBEAT = os.getenv("ENABLE_HEARTBEAT", "0").strip() == "1"
 HEARTBEAT_TEXT = os.getenv("HEARTBEAT_TEXT", "🧪 Heartbeat: 워크플로우는 정상 동작 중입니다.")
 
-# ========= HTTP 세션 공통 =========
+# ========= HTTP 공통 =========
 SESSION = requests.Session()
 SESSION.headers.update({
-    "User-Agent": "Mozilla/5.0 (compatible; EtolandCrawler/2.0; +https://github.com/your/repo)",
+    "User-Agent": "Mozilla/5.0 (compatible; EtolandCrawler/2.2; +https://github.com/your/repo)",
     "Accept-Language": "ko,ko-KR;q=0.9,en;q=0.8",
     "Referer": "https://www.etoland.co.kr/",
     "Connection": "close",
@@ -74,7 +75,33 @@ def get_encoding_safe_text(resp: requests.Response) -> str:
         resp.encoding = resp.apparent_encoding or "utf-8"
     return resp.text
 
-# wr_id/bo_table 파싱(PC/모바일 URL 모두 허용)
+def text_summary_from_html(soup: BeautifulSoup, max_chars: int = 280) -> str:
+    # 본문 컨테이너 추려서 텍스트 요약
+    candidates = [
+        "#bo_v_con", ".bo_v_con", "div.view_content", ".viewContent",
+        "#view_content", "article"
+    ]
+    container = None
+    for sel in candidates:
+        found = soup.select_one(sel)
+        if found:
+            container = found
+            break
+    if container is None:
+        container = soup
+
+    # 이미지/스크립트/스타일 제거된 텍스트
+    for tag in container(["script", "style", "noscript"]):
+        tag.extract()
+    text = container.get_text(" ", strip=True)
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return ""
+    if len(text) > max_chars:
+        return text[:max_chars - 1] + "…"
+    return text
+
+# wr_id/bo_table 파싱
 LINK_RE = re.compile(
     r"(?:board\.php|plugin/mobile/board\.php)\?[^\"'>]*\bbo_table=([a-z0-9_]+)\b[^\"'>]*\bwr_id=(\d+)",
     re.I,
@@ -91,7 +118,6 @@ def extract_bo_and_id(href: str):
         except Exception:
             wr = None
         return bo, wr
-    # fallback: 쿼리 파싱
     try:
         q = parse_qs(urlparse(href).query)
         bo = (q.get("bo_table", [""])[0] or "").lower()
@@ -107,10 +133,9 @@ def absolutize(base: str, url: str) -> str:
         return "https:" + url
     return urljoin(base, url)
 
-# ========= 목록/본문 파싱 =========
+# ========= 목록 수집 =========
 def fetch_humor_약후_list() -> list[dict]:
-    """유머게시판 '약후' 카테고리 전용 목록"""
-    url = f"{BASE_HUMOR_URL}&sca={euckr_quote(HUMOR_SCA_FIXED)}"
+    url = f"{BASE_HUMOR_URL}&sca={euckr_quote('약후')}"
     r = SESSION.get(url, timeout=TIMEOUT)
     html = get_encoding_safe_text(r)
     soup = BeautifulSoup(html, "html.parser")
@@ -131,7 +156,6 @@ def fetch_humor_약후_list() -> list[dict]:
     return res
 
 def fetch_star_list() -> list[dict]:
-    """연예인 게시판 전체 목록"""
     url = BASE_STAR_URL
     r = SESSION.get(url, timeout=TIMEOUT)
     html = get_encoding_safe_text(r)
@@ -152,11 +176,16 @@ def fetch_star_list() -> list[dict]:
     print(f"[debug] star list fetched: {len(res)} items")
     return res
 
-def fetch_content_media(post_url: str) -> dict:
+# ========= 본문 미디어/요약 =========
+def fetch_content_media_and_summary(post_url: str) -> dict:
     r = SESSION.get(post_url, timeout=TIMEOUT)
     html = get_encoding_safe_text(r)
     soup = BeautifulSoup(html, "html.parser")
 
+    # 요약
+    summary = text_summary_from_html(soup, max_chars=280)
+
+    # 컨테이너 재활용
     candidates = [
         "#bo_v_con", ".bo_v_con", "div.view_content", ".viewContent",
         "#view_content", "article"
@@ -175,21 +204,34 @@ def fetch_content_media(post_url: str) -> dict:
         src = img.get("src")
         if not src:
             continue
-        src = absolutize(post_url, src)
-        if src.lower().endswith((".jpg", ".jpeg", ".png", ".gif", ".webp")):
-            images.append(src)
+        images.append(absolutize(post_url, src))
 
+    # 직접 파일 동영상만(그룹 전송 가능)
+    video_exts = (".mp4", ".mov", ".webm", ".mkv", ".m4v")
     videos = []
-    for v in container.find_all(["video", "source", "iframe"]):
+    for v in container.find_all(["video", "source"]):
         src = v.get("src")
         if not src:
             continue
         src = absolutize(post_url, src)
-        videos.append(src)
+        if any(src.lower().endswith(ext) for ext in video_exts):
+            videos.append(src)
 
-    return {"images": images[:5], "videos": videos[:3]}
+    # iframe(유튜브 등) 링크는 텍스트로 안내
+    iframes = []
+    for f in container.find_all("iframe"):
+        src = f.get("src")
+        if src:
+            iframes.append(absolutize(post_url, src))
 
-# ========= 텔레그램 전송(응답 로그 포함) =========
+    # 중복 제거
+    images = list(dict.fromkeys(images))
+    videos = list(dict.fromkeys(videos))
+    iframes = list(dict.fromkeys(iframes))
+
+    return {"images": images, "videos": videos, "iframes": iframes, "summary": summary}
+
+# ========= 텔레그램 전송 =========
 def tg_post(method: str, data: dict):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/{method}"
     r = SESSION.post(url, data=data, timeout=TIMEOUT)
@@ -208,21 +250,25 @@ def tg_send_text(text: str):
         "disable_web_page_preview": False
     })
 
-def tg_send_photo(photo_url: str, caption: str | None = None):
-    return tg_post("sendPhoto", {
+def tg_send_media_group(media_items: list[dict]):
+    return tg_post("sendMediaGroup", {
         "chat_id": TELEGRAM_CHAT_ID,
-        "caption": caption or "",
-        "photo": photo_url
+        "media": json.dumps(media_items, ensure_ascii=False)
     })
 
-def tg_send_video(video_url: str, caption: str | None = None):
-    return tg_post("sendVideo", {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "caption": caption or "",
-        "video": video_url
-    })
+# ========= 메인 =========
+def build_caption(title: str, url: str, summary: str, batch_idx: int | None, total_batches: int | None) -> str:
+    # 텔레그램 캡션 최대 1024자. 넉넉히 900자로 제한.
+    prefix = f"📌 <b>{title}</b>"
+    if batch_idx is not None and total_batches is not None and total_batches > 1:
+        prefix += f"  ({batch_idx}/{total_batches})"
+    body = f"\n{summary}" if summary else ""
+    suffix = f"\n{url}"
+    caption = f"{prefix}{body}{suffix}"
+    if len(caption) > 900:
+        caption = caption[:897] + "…"
+    return caption
 
-# ========= 메인 로직 =========
 def process():
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         raise RuntimeError("TELEGRAM_TOKEN / TELEGRAM_CHAT_ID 환경변수가 필요합니다.")
@@ -230,11 +276,9 @@ def process():
     if ENABLE_HEARTBEAT:
         tg_send_text(HEARTBEAT_TEXT)
 
-    # 1) 유머(약후) + 2) 연예인 목록 가져오기
     posts_humor = fetch_humor_약후_list()
     posts_star  = fetch_star_list()
 
-    # 병합 & dedup
     merged = {}
     for p in posts_humor + posts_star:
         key = (p["bo_table"], p["wr_id"])
@@ -242,11 +286,10 @@ def process():
             merged[key] = p
 
     posts = list(merged.values())
-    posts.sort(key=lambda x: (x["bo_table"], x["wr_id"]))  # 오래된 것부터 전송
+    posts.sort(key=lambda x: (x["bo_table"], x["wr_id"]))  # 오래된 것부터
 
     print(f"[debug] merged items: {len(posts)}")
 
-    # 이미 본 항목 제외
     seen = load_seen()
     to_send = []
     for p in posts:
@@ -258,36 +301,65 @@ def process():
         print("[info] 새 글 없음.")
         return
 
-    # 전송
     sent_keys = []
     for p in to_send:
         bo = p["bo_table"]
         wr = p["wr_id"]
         title = p["title"]
         url = p["url"]
-        header = f"📌 <b>[{bo}] {title}</b>\n{url}"
 
-        media = fetch_content_media(url)
-        sent_any = False
+        media = fetch_content_media_and_summary(url)
+        images = media["images"]
+        videos = media["videos"]
+        iframes = media["iframes"]
+        summary = media["summary"]
 
-        if media["images"]:
-            tg_send_photo(media["images"][0], caption=header)
-            sent_any = True
-            extra = len(media["images"]) - 1
-            if extra > 0:
-                tg_send_text(f"🖼 추가 이미지 {extra}장 더 있음 → 원문 링크 확인")
+        # 미디어 합치고 10개씩 배치
+        media_urls = images + videos  # 사진 우선, 뒤에 동영상
+        if not media_urls:
+            # 미디어가 없으면 텍스트만 (제목+요약+링크)
+            caption = build_caption(title, url, summary, None, None)
+            tg_send_text(caption)
+            sent_keys.append(f"{bo}:{wr}")
+            time.sleep(1)
+            continue
 
-        if media["videos"]:
-            r, j = tg_send_video(media["videos"][0], caption=f"🎬 동영상(1/?)\n{url}")
+        MAX_ITEMS = 10
+        total = len(media_urls)
+        total_batches = (total + MAX_ITEMS - 1) // MAX_ITEMS
+
+        for batch_idx in range(total_batches):
+            start = batch_idx * MAX_ITEMS
+            end = min(start + MAX_ITEMS, total)
+            chunk = media_urls[start:end]
+
+            media_items = []
+            for i, murl in enumerate(chunk):
+                # 동영상 확장자면 video, 아니면 photo로 보냄
+                typ = "video" if any(murl.lower().endswith(ext) for ext in (".mp4", ".mov", ".webm", ".mkv", ".m4v")) else "photo"
+                item = {"type": typ, "media": murl}
+                # 첫 배치의 첫 항목에만 캡션 달기
+                if batch_idx == 0 and i == 0:
+                    item["caption"] = build_caption(title, url, summary, batch_idx + 1, total_batches)
+                    item["parse_mode"] = "HTML"
+                # 두 번째 이후 배치의 첫 항목에는 간단 캡션
+                elif i == 0 and total_batches > 1:
+                    item["caption"] = f"({batch_idx + 1}/{total_batches}) 계속"
+                media_items.append(item)
+
+            r, j = tg_send_media_group(media_items)
             if not j.get("ok"):
-                tg_send_text(f"🎬 동영상 링크: {media['videos'][0]}")
-            sent_any = True
+                # 실패 시 텍스트로 폴백
+                tg_send_text(build_caption(title, url, summary, batch_idx + 1, total_batches))
+            time.sleep(1)
 
-        if not sent_any:
-            tg_send_text(header)
+        # iframe 안내 (유튜브 등)
+        if iframes:
+            tg_send_text("🎬 임베드 동영상 링크:\n" + "\n".join(iframes[:5]))
 
+        # 남는 미디어(배치 외)는 없음 — 이미 배치로 모두 전송
         sent_keys.append(f"{bo}:{wr}")
-        time.sleep(1)  # 예절상 대기
+        time.sleep(1)
 
     append_seen(sent_keys)
     print(f"[info] appended {len(sent_keys)} new keys to seen set")
