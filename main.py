@@ -11,21 +11,27 @@ from bs4 import BeautifulSoup
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# 기본: 유머게시판 전체. 특정 카테고리만(예: "약후") 보고 싶으면 저장소 Variables에 ETO_SCA_KO=약후 등록
-BASE_LIST_URL = "https://www.etoland.co.kr/bbs/board.php?bo_table=etohumor07"
-ETO_SCA_KO = os.getenv("ETO_SCA_KO", "").strip()
+# [요청사항 반영] 유머게시판은 "약후"만 전송 (기본값을 '약후'로 고정)
+TARGET_BOARD = "etohumor07"
+BASE_LIST_URL = f"https://www.etoland.co.kr/bbs/board.php?bo_table={TARGET_BOARD}"
+ETO_SCA_KO = (os.getenv("ETO_SCA_KO") or "약후").strip()  # ← 기본 '약후'
 
-# 재전송 방지용 상태 파일 (저장소에 커밋됨)
-STATE_FILE = os.getenv("STATE_FILE", "state/last_id.txt")
+# 인기글: 전부 전송 (기본 전체 허용 '*')
+MONITOR_HIT = os.getenv("MONITOR_HIT", "1").strip() == "1"
+HIT_URL = "https://www.etoland.co.kr/bbs/hit.php"
+HIT_FILTER_BO_TABLES = os.getenv("HIT_FILTER_BO_TABLES", "*").strip()  # ← 기본 '*': 전부 허용
 
-# 하트비트(테스트용) — 1로 설정하면 실행할 때마다 “동작 확인” 메시지를 보냄
+# 재전송 방지(게시판/글번호 단위로 기록)
+SEEN_SET_FILE = os.getenv("SEEN_SET_FILE", "state/seen_ids.txt")
+
+# 하트비트(테스트용)
 ENABLE_HEARTBEAT = os.getenv("ENABLE_HEARTBEAT", "0").strip() == "1"
 HEARTBEAT_TEXT = os.getenv("HEARTBEAT_TEXT", "🧪 Heartbeat: 워크플로우는 정상 동작 중입니다.")
 
 # ========= HTTP 세션 공통 =========
 SESSION = requests.Session()
 SESSION.headers.update({
-    "User-Agent": "Mozilla/5.0 (compatible; EtolandCrawler/1.0; +https://github.com/your/repo)",
+    "User-Agent": "Mozilla/5.0 (compatible; EtolandCrawler/1.2; +https://github.com/your/repo)",
     "Accept-Language": "ko,ko-KR;q=0.9,en;q=0.8",
     "Referer": "https://www.etoland.co.kr/",
     "Connection": "close",
@@ -34,19 +40,30 @@ TIMEOUT = 15
 
 # ========= 유틸 =========
 def ensure_state_dir():
-    pathlib.Path(os.path.dirname(STATE_FILE) or ".").mkdir(parents=True, exist_ok=True)
+    pathlib.Path("state").mkdir(parents=True, exist_ok=True)
 
-def read_last_id() -> int:
-    try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            return int(f.read().strip())
-    except Exception:
-        return 0
-
-def write_last_id(wr_id: int):
+def load_seen() -> set:
     ensure_state_dir()
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        f.write(str(wr_id))
+    s = set()
+    p = pathlib.Path(SEEN_SET_FILE)
+    if p.exists():
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        s.add(line)
+        except Exception:
+            pass
+    return s
+
+def append_seen(keys: list[str]):
+    if not keys:
+        return
+    ensure_state_dir()
+    with open(SEEN_SET_FILE, "a", encoding="utf-8") as f:
+        for k in keys:
+            f.write(k + "\n")
 
 def euckr_quote(s: str) -> str:
     try:
@@ -55,35 +72,40 @@ def euckr_quote(s: str) -> str:
         return quote(s)
 
 def build_list_url() -> str:
-    if ETO_SCA_KO:
-        return f"{BASE_LIST_URL}&sca={euckr_quote(ETO_SCA_KO)}"
-    return BASE_LIST_URL
+    # 반드시 sca=약후(또는 변수값) 파라미터를 달아 목록을 제한
+    sca = ETO_SCA_KO or "약후"
+    return f"{BASE_LIST_URL}&sca={euckr_quote(sca)}"
 
 def get_encoding_safe_text(resp: requests.Response) -> str:
     if not resp.encoding or resp.encoding.lower() in ("iso-8859-1", "ansi_x3.4-1968"):
         resp.encoding = resp.apparent_encoding or "utf-8"
     return resp.text
 
-# wr_id 파싱(PC/모바일 URL 모두 허용)
-WR_ID_RE = re.compile(r"(?:board\.php|plugin/mobile/board\.php)\?[^\"'>]*\bbo_table=etohumor07\b[^\"'>]*\bwr_id=(\d+)", re.I)
+# wr_id/bo_table 파싱(PC/모바일 URL 모두 허용)
+LINK_RE = re.compile(
+    r"(?:board\.php|plugin/mobile/board\.php)\?[^\"'>]*\bbo_table=([a-z0-9_]+)\b[^\"'>]*\bwr_id=(\d+)",
+    re.I,
+)
 
-def extract_wr_id_from_href(href: str) -> int | None:
+def extract_bo_and_id(href: str):
     if not href:
-        return None
-    m = WR_ID_RE.search(href)
+        return None, None
+    m = LINK_RE.search(href)
     if m:
+        bo = m.group(1).lower()
         try:
-            return int(m.group(1))
+            wr = int(m.group(2))
         except Exception:
-            return None
-    # 쿼리 파싱 보강
+            wr = None
+        return bo, wr
+    # fallback: 쿼리 파싱
     try:
         q = parse_qs(urlparse(href).query)
-        if "wr_id" in q:
-            return int(q["wr_id"][0])
+        bo = (q.get("bo_table", [""])[0] or "").lower()
+        wr = int(q.get("wr_id", ["0"])[0])
+        return bo or None, wr or None
     except Exception:
-        pass
-    return None
+        return None, None
 
 def absolutize(base: str, url: str) -> str:
     if not url:
@@ -93,7 +115,8 @@ def absolutize(base: str, url: str) -> str:
     return urljoin(base, url)
 
 # ========= 목록/본문 파싱 =========
-def fetch_list() -> list[dict]:
+def fetch_list_from_board() -> list[dict]:
+    """유머게시판 목록 (약후만)"""
     url = build_list_url()
     r = SESSION.get(url, timeout=TIMEOUT)
     html = get_encoding_safe_text(r)
@@ -101,15 +124,54 @@ def fetch_list() -> list[dict]:
 
     posts = {}
     for a in soup.find_all("a", href=True):
-        wr_id = extract_wr_id_from_href(a["href"])
-        if not wr_id:
+        bo, wr = extract_bo_and_id(a["href"])
+        if not bo or not wr:
             continue
-        title = a.get_text(strip=True) or f"글번호 {wr_id}"
+        # 유머게시판만
+        if bo != TARGET_BOARD:
+            continue
+        title = a.get_text(strip=True) or f"[{bo}] 글번호 {wr}"
         link = absolutize(url, a["href"])
-        if wr_id not in posts or (title and len(title) > len(posts[wr_id]["title"])):
-            posts[wr_id] = {"wr_id": wr_id, "title": title, "url": link}
+        key = (bo, wr)
+        if key not in posts or (title and len(title) > len(posts[key]["title"])):
+            posts[key] = {"bo_table": bo, "wr_id": wr, "title": title, "url": link}
 
-    return sorted(posts.values(), key=lambda x: x["wr_id"], reverse=True)
+    res = sorted(posts.values(), key=lambda x: x["wr_id"], reverse=True)
+    print(f"[debug] board list fetched (sca={ETO_SCA_KO or '약후'}): {len(res)} items")
+    return res
+
+def _allowed_bo_in_hit(bo: str) -> bool:
+    if HIT_FILTER_BO_TABLES == "*":
+        return True
+    allow = {b.strip().lower() for b in HIT_FILTER_BO_TABLES.split(",") if b.strip()}
+    return bo.lower() in allow
+
+def fetch_list_from_hit() -> list[dict]:
+    """인기글 목록 (전부 허용: 기본 '*')"""
+    if not MONITOR_HIT:
+        return []
+
+    r = SESSION.get(HIT_URL, timeout=TIMEOUT)
+    html = get_encoding_safe_text(r)
+    soup = BeautifulSoup(html, "html.parser")
+
+    posts = {}
+    for a in soup.find_all("a", href=True):
+        bo, wr = extract_bo_and_id(a["href"])
+        if not bo or not wr:
+            continue
+        if not _allowed_bo_in_hit(bo):
+            continue
+
+        title = a.get_text(strip=True) or f"[{bo}] 글번호 {wr}"
+        link = absolutize(HIT_URL, a["href"])
+        key = (bo, wr)
+        if key not in posts or (title and len(title) > len(posts[key]["title"])):
+            posts[key] = {"bo_table": bo, "wr_id": wr, "title": title, "url": link}
+
+    res = sorted(posts.values(), key=lambda x: (x["bo_table"], x["wr_id"]), reverse=True)
+    print(f"[debug] hit list fetched: {len(res)} items (allowed={HIT_FILTER_BO_TABLES})")
+    return res
 
 def fetch_content_media(post_url: str) -> dict:
     r = SESSION.get(post_url, timeout=TIMEOUT)
@@ -189,30 +251,44 @@ def process():
     if ENABLE_HEARTBEAT:
         tg_send_text(HEARTBEAT_TEXT)
 
-    last_id = read_last_id()
-    print(f"[info] last_id(state)={last_id}")
+    # 1) 유머게시판(약후 전용) 목록
+    posts_board = fetch_list_from_board()
 
-    posts = fetch_list()
-    print(f"[debug] fetched posts count={len(posts)}")
-    if posts[:3]:
-        print("[debug] sample posts:", posts[:3])
+    # 2) 인기글 목록(전부 허용 또는 필터)
+    posts_hit = fetch_list_from_hit()
 
-    if not posts:
-        print("[warn] 목록 파싱 실패 또는 게시물 없음")
-        return
+    # 병합 & dedup: (bo_table, wr_id) 기준
+    merged = {}
+    for p in posts_board + posts_hit:
+        key = (p["bo_table"], p["wr_id"])
+        if key not in merged:
+            merged[key] = p
 
-    new_posts = [p for p in posts if p["wr_id"] > last_id]
-    if not new_posts:
+    posts = list(merged.values())
+    posts.sort(key=lambda x: (x["bo_table"], x["wr_id"]))  # 오래된 것부터 전송
+
+    print(f"[debug] merged items: {len(posts)}")
+
+    # 이미 본 항목 제외
+    seen = load_seen()
+    to_send = []
+    for p in posts:
+        key = f"{p['bo_table']}:{p['wr_id']}"
+        if key not in seen:
+            to_send.append(p)
+
+    if not to_send:
         print("[info] 새 글 없음.")
         return
 
-    new_posts_sorted = sorted(new_posts, key=lambda x: x["wr_id"])
-
-    sent_max_id = last_id
-    for p in new_posts_sorted:
+    # 전송
+    sent_keys = []
+    for p in to_send:
+        bo = p["bo_table"]
+        wr = p["wr_id"]
         title = p["title"]
         url = p["url"]
-        header = f"📌 <b>{title}</b>\n{url}"
+        header = f"📌 <b>[{bo}] {title}</b>\n{url}"
 
         media = fetch_content_media(url)
         sent_any = False
@@ -225,7 +301,6 @@ def process():
                 tg_send_text(f"🖼 추가 이미지 {extra}장 더 있음 → 원문 링크 확인")
 
         if media["videos"]:
-            # 일부는 직접 재생 불가일 수 있음(특히 iframe). 실패 시 링크로 대체.
             r, j = tg_send_video(media["videos"][0], caption=f"🎬 동영상(1/?)\n{url}")
             if not j.get("ok"):
                 tg_send_text(f"🎬 동영상 링크: {media['videos'][0]}")
@@ -234,12 +309,11 @@ def process():
         if not sent_any:
             tg_send_text(header)
 
-        sent_max_id = max(sent_max_id, p["wr_id"])
-        time.sleep(1)  # 예절상 대기
+        sent_keys.append(f"{bo}:{wr}")
+        time.sleep(1)
 
-    if sent_max_id > last_id:
-        write_last_id(sent_max_id)
-        print(f"[info] state updated: last_id={sent_max_id}")
+    append_seen(sent_keys)
+    print(f"[info] appended {len(sent_keys)} new keys to seen set")
 
 if __name__ == "__main__":
     process()
