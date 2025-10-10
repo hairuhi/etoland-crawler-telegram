@@ -1,46 +1,56 @@
-
 name: Etoland Yakhu Only
+
 on:
   schedule:
-    - cron: "*/5 * * * *"
-  workflow_dispatch:
+    - cron: "*/5 * * * *"  # 5분마다 자동 실행
+  workflow_dispatch:       # 수동 실행 버튼
+
 permissions:
   contents: write
+
 concurrency:
   group: etoland-yakhu-only
   cancel-in-progress: false
+
 jobs:
   run:
     runs-on: ubuntu-latest
     steps:
+      # 1️⃣ 저장소 코드 가져오기
       - name: Checkout (full)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      # 2️⃣ 깃 설정
       - name: Git identity
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      # 3️⃣ 혹시 있을 변경사항 가져오기
       - name: Pull latest (best-effort)
         run: git pull --rebase || true
+
+      # 4️⃣ Python 설치
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
+      # 5️⃣ 의존성 설치
       - name: Install deps
         run: pip install -r requirements.txt
-      - name: Run crawler
+
+      # 6️⃣ ✅ 텔레그램 셀프테스트 (가장 중요!)
+      - name: Telegram self-test
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python -u main.py
-      - name: Commit state if changed
         run: |
-          if [ -n "$(git status --porcelain)" ]; then
-            git add state/ || true
-            git commit -m "chore(state): update seen_ids [skip ci]" || true
-            git pull --rebase || true
-            git push || true
-          else
-            echo "No state changes."
-          fi
+          echo "== getMe =="
+          curl -s "https://api.telegram.org/bot${TELEGRAM_TOKEN}/getMe" || true
+          echo
+          echo "== sendMessage test =="
+          curl -s --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+               --data-urlencode "text=✅ GitHub Actions → Telegram self-test" \
