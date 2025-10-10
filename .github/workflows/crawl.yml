@@ -1,10 +1,78 @@
-- name: Run crawler
-  env:
-    TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-    TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-    ENABLE_HEARTBEAT: "1"
-    DOWNLOAD_AND_UPLOAD: "1"            # ← 핫링크 회피 (권장)
-    EXCLUDE_IMAGE_SUBSTRINGS: "link.php?,/logo/,/banner/"  # ← 필요시 추가
-    FORCE_SEND_LATEST: "0"
-    RESET_SEEN: "0"
-  run: python -u main.py
+name: Etoland Yakhu Only
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"  # 5분마다
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: etoland-yakhu-only
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Git identity
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Pull latest (best-effort)
+        run: git pull --rebase || true
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      # ✅ Telegram self-test (개행 없이 --get 사용)
+      - name: Telegram self-test
+        shell: bash
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          echo "== getMe =="
+          curl -s "https://api.telegram.org/bot${TELEGRAM_TOKEN}/getMe" || true
+          echo
+          echo "Token length: ${#TELEGRAM_TOKEN}, ChatID length: ${#TELEGRAM_CHAT_ID}"
+          echo "== sendMessage test =="
+          curl -s --get \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=✅ GitHub Actions → Telegram self-test" \
+            "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" || true
+          echo
+
+      - name: Run crawler
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          ENABLE_HEARTBEAT: "1"       # 시작 알림
+          DOWNLOAD_AND_UPLOAD: "1"            # ← 핫링크 회피 (권장)
+          EXCLUDE_IMAGE_SUBSTRINGS: "link.php?,/logo/,/banner/"  # ← 필요시 추가
+          FORCE_SEND_LATEST: "0"      # 테스트 강제전송 원하면 "1"
+          RESET_SEEN: "0"             # 상태 초기화 1회만 "1"
+        run: python -u main.py
+
+      - name: Commit state if changed
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            git add state/ || true
+            git commit -m "chore(state): update seen_ids [skip ci]" || true
+            git pull --rebase || true
+            git push || true
+          else
+            echo "No state changes."
+          fi
