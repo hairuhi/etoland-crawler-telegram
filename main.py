@@ -1,4 +1,3 @@
-
 import os
 import re
 import json
@@ -10,7 +9,7 @@ import requests
 from bs4 import BeautifulSoup
 
 # ========= Telegram =========
-TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 # ========= Target (STRICT) =========
@@ -21,20 +20,24 @@ TARGET_BOARD = "etohumor07"
 # ========= State / Heartbeat =========
 SEEN_FILE = os.getenv("SEEN_SET_FILE", "state/seen_ids.txt")  # etoland:etohumor07:wr_id
 ENABLE_HEARTBEAT = os.getenv("ENABLE_HEARTBEAT", "0").strip() == "1"
-HEARTBEAT_TEXT   = os.getenv("HEARTBEAT_TEXT", "🧪 Heartbeat: bot alive.")
+HEARTBEAT_TEXT = os.getenv("HEARTBEAT_TEXT", "🧪 Heartbeat: bot alive.")
 
 # ========= HTTP =========
 SESSION = requests.Session()
-SESSION.headers.update({
-    "User-Agent": "Mozilla/5.0 (compatible; EtolandYakhuOnly/1.2; +https://github.com/your/repo)",
-    "Accept-Language": "ko,ko-KR;q=0.9,en;q=0.8",
-    "Referer": "https://www.etoland.co.kr/",
-    "Connection": "close",
-})
+SESSION.headers.update(
+    {
+        "User-Agent": "Mozilla/5.0 (compatible; EtolandYakhuOnly/1.3; +https://github.com/your/repo)",
+        "Accept-Language": "ko,ko-KR;q=0.9,en;q=0.8",
+        "Referer": "https://www.etoland.co.kr/",
+        "Connection": "close",
+    }
+)
 TIMEOUT = 15
 
-def ensure_state_dir():
+
+def ensure_state_dir() -> None:
     pathlib.Path("state").mkdir(parents=True, exist_ok=True)
+
 
 def load_seen() -> set:
     ensure_state_dir()
@@ -51,7 +54,8 @@ def load_seen() -> set:
             pass
     return s
 
-def append_seen(keys: list[str]):
+
+def append_seen(keys: list[str]) -> None:
     if not keys:
         return
     ensure_state_dir()
@@ -59,10 +63,12 @@ def append_seen(keys: list[str]):
         for k in keys:
             f.write(k + "\n")
 
+
 def get_encoding_safe_text(resp: requests.Response) -> str:
     if not resp.encoding or resp.encoding.lower() in ("iso-8859-1", "ansi_x3.4-1968"):
         resp.encoding = resp.apparent_encoding or "utf-8"
     return resp.text
+
 
 def absolutize(base: str, url: str) -> str:
     if not url:
@@ -71,11 +77,13 @@ def absolutize(base: str, url: str) -> str:
         return "https:" + url
     return urljoin(base, url)
 
+
 # --- STRICT: extract wr_id + verify bo_table ---
 LINK_RE = re.compile(
     r"(?:^|/)(?:board\.php|plugin/mobile/board\.php)\?[^\"'>]*bo_table=([a-z0-9_]+)[^\"'>]*wr_id=(\d+)",
     re.I,
 )
+
 
 def extract_bo_and_id(href: str):
     if not href:
@@ -100,6 +108,7 @@ def extract_bo_and_id(href: str):
     except Exception:
         return None, None
 
+
 def text_summary_from_html(soup: BeautifulSoup, max_chars: int = 280) -> str:
     candidates = ["#bo_v_con", ".bo_v_con", "div.view_content", ".viewContent", "#view_content", "article"]
     container = None
@@ -114,7 +123,10 @@ def text_summary_from_html(soup: BeautifulSoup, max_chars: int = 280) -> str:
         tag.extract()
     text = container.get_text(" ", strip=True)
     text = re.sub(r"\s+", " ", text).strip()
-    return (text[:max_chars - 1] + "…") if (text and len(text) > max_chars) else (text or "")
+    if not text:
+        return ""
+    return text[: max_chars - 1] + "…" if len(text) > max_chars else text
+
 
 def fetch_content_media_and_summary(post_url: str) -> dict:
     r = SESSION.get(post_url, timeout=TIMEOUT)
@@ -173,6 +185,7 @@ def fetch_content_media_and_summary(post_url: str) -> dict:
 
     return {"images": images, "videos": videos, "iframes": iframes, "summary": summary, "title_override": title}
 
+
 # --- Telegram ---
 def tg_post(method: str, data: dict):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/{method}"
@@ -184,19 +197,28 @@ def tg_post(method: str, data: dict):
     print(f"[tg] {method} status={r.status_code} ok={j.get('ok')} desc={j.get('description')}")
     return r, j
 
+
 def tg_send_text(text: str):
-    return tg_post("sendMessage", {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": text,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": False
-    })
+    return tg_post(
+        "sendMessage",
+        {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": False,
+        },
+    )
+
 
 def tg_send_media_group(media_items: list[dict]):
-    return tg_post("sendMediaGroup", {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "media": json.dumps(media_items, ensure_ascii=False)
-    })
+    return tg_post(
+        "sendMediaGroup",
+        {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "media": json.dumps(media_items, ensure_ascii=False),
+        },
+    )
+
 
 def build_caption(title: str, url: str, summary: str, batch_idx: int | None, total_batches: int | None) -> str:
     prefix = f"📌 <b>{title}</b>"
@@ -208,6 +230,7 @@ def build_caption(title: str, url: str, summary: str, batch_idx: int | None, tot
     if len(caption) > 900:
         caption = caption[:897] + "…"
     return caption
+
 
 # --- STRICT listing parse ---
 def fetch_hgall_yakhu_list() -> list[dict]:
@@ -238,6 +261,7 @@ def fetch_hgall_yakhu_list() -> list[dict]:
     print(f"[debug] hgall(약후 strict) list fetched: {len(res)} items")
     return res
 
+
 def process():
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         raise RuntimeError("TELEGRAM_TOKEN / TELEGRAM_CHAT_ID is required")
@@ -263,7 +287,7 @@ def process():
     sent_keys = []
     for p in to_send:
         title = p["title"]
-        url   = p["url"]
+        url = p["url"]
 
         media = fetch_content_media_and_summary(url)
         if media.get("title_override"):
@@ -294,7 +318,9 @@ def process():
 
             media_items = []
             for i, murl in enumerate(chunk):
-                typ = "video" if any(murl.lower().endswith(ext) for ext in (".mp4", ".mov", ".webm", ".mkv", ".m4v")) else "photo"
+                typ = "video" if any(
+                    murl.lower().endswith(ext) for ext in (".mp4", ".mov", ".webm", ".mkv", ".m4v")
+                ) else "photo"
                 item = {"type": typ, "media": murl}
                 if batch_idx == 0 and i == 0:
                     item["caption"] = build_caption(title, url, summary, batch_idx + 1, total_batches)
@@ -308,17 +334,16 @@ def process():
                 tg_send_text(build_caption(title, url, summary, batch_idx + 1, total_batches))
             time.sleep(1)
 
-# iframe(유튜브 등) 안내
-if iframes:
-    lines = "\n".join(iframes[:5])
-    tg_send_text("\U0001F3A5 임베드 동영상 링크:\n" + lines)
-
+        if iframes:
+            lines = "\n".join(iframes[:5])
+            tg_send_text("\U0001F3A5 임베드 동영상 링크:\n" + lines)
 
         sent_keys.append(p["_seen_key"])
         time.sleep(1)
 
     append_seen(sent_keys)
     print(f"[info] appended {len(sent_keys)} keys")
+
 
 if __name__ == "__main__":
     process()
