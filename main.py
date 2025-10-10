@@ -308,8 +308,11 @@ def process():
                 tg_send_text(build_caption(title, url, summary, batch_idx + 1, total_batches))
             time.sleep(1)
 
-        if iframes:
-            tg_send_text("🎬 임베드 동영상 링크:\n" + "\n".join(iframes[:5]))
+# iframe(유튜브 등) 안내
+if iframes:
+    lines = "\n".join(iframes[:5])
+    tg_send_text("\U0001F3A5 임베드 동영상 링크:\n" + lines)
+
 
         sent_keys.append(p["_seen_key"])
         time.sleep(1)
