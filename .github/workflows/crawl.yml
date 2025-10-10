@@ -1,0 +1,46 @@
+
+name: Etoland Yakhu Only
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: etoland-yakhu-only
+  cancel-in-progress: false
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Git identity
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+      - name: Pull latest (best-effort)
+        run: git pull --rebase || true
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: pip install -r requirements.txt
+      - name: Run crawler
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python -u main.py
+      - name: Commit state if changed
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            git add state/ || true
+            git commit -m "chore(state): update seen_ids [skip ci]" || true
+            git pull --rebase || true
+            git push || true
+          else
+            echo "No state changes."
+          fi
