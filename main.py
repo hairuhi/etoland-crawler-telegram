@@ -3,6 +3,7 @@ import re
 import json
 import time
 import pathlib
+from io import BytesIO
 from urllib.parse import urljoin, urlparse, parse_qs
 
 import requests
@@ -12,30 +13,45 @@ from bs4 import BeautifulSoup
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# ========= Target (STRICT to Yakhu) =========
+# ========= Target (Yakhu only) =========
 HGALL_URL = "https://www.etoland.co.kr/bbs/hgall.php?bo_table=etohumor07&sca=%BE%E0%C8%C4"
 TARGET_BOARD = "etohumor07"
 
 # ========= State / Debug =========
-SEEN_FILE = os.getenv("SEEN_SET_FILE", "state/seen_ids.txt")  # etoland:etohumor07:wr_id
+SEEN_FILE = os.getenv("SEEN_SET_FILE", "state/seen_ids.txt")
 ENABLE_HEARTBEAT = os.getenv("ENABLE_HEARTBEAT", "0").strip() == "1"
 HEARTBEAT_TEXT = os.getenv("HEARTBEAT_TEXT", "🧪 Heartbeat: bot alive.")
-
-# Debug helpers
 FORCE_SEND_LATEST = os.getenv("FORCE_SEND_LATEST", "0").strip() == "1"
 RESET_SEEN = os.getenv("RESET_SEEN", "0").strip() == "1"
+
+# ========= Behavior toggles =========
+# 1) 핫링크 회피: 이미지를 직접 내려받아 파일로 업로드(권장)
+DOWNLOAD_AND_UPLOAD = os.getenv("DOWNLOAD_AND_UPLOAD", "0").strip() == "1"
+# 2) 제외할 이미지 URL 조각들(콤마 구분)
+EXCLUDE_IMAGE_SUBSTRINGS = [
+    # 기본 제외(사이트 썸네일/플레이스홀더/로고류로 의심되는 패턴)
+    "link.php?",
+    "/logo/",
+    "/banner/",
+    "/ads/",
+    "/noimage",
+    "/favicon",
+]
+_extra = os.getenv("EXCLUDE_IMAGE_SUBSTRINGS", "").strip()
+if _extra:
+    EXCLUDE_IMAGE_SUBSTRINGS += [s.strip() for s in _extra.split(",") if s.strip()]
 
 # ========= HTTP =========
 SESSION = requests.Session()
 SESSION.headers.update(
     {
-        "User-Agent": "Mozilla/5.0 (compatible; EtolandYakhuOnly/1.4; +https://github.com/your/repo)",
+        "User-Agent": "Mozilla/5.0 (compatible; EtolandYakhuOnly/1.5; +https://github.com/your/repo)",
         "Accept-Language": "ko,ko-KR;q=0.9,en;q=0.8",
         "Referer": "https://www.etoland.co.kr/",
         "Connection": "close",
     }
 )
-TIMEOUT = 15
+TIMEOUT = 20
 
 
 def ensure_state_dir() -> None:
@@ -45,7 +61,7 @@ def ensure_state_dir() -> None:
 def load_seen() -> set:
     ensure_state_dir()
     if RESET_SEEN:
-        print("[debug] RESET_SEEN=1 → seen set ignored this run")
+        print("[debug] RESET_SEEN=1 → ignoring previous seen set this run")
         return set()
     s = set()
     p = pathlib.Path(SEEN_FILE)
@@ -84,8 +100,12 @@ def absolutize(base: str, url: str) -> str:
     return urljoin(base, url)
 
 
+def is_excluded_image(url: str) -> bool:
+    low = url.lower()
+    return any(hint.lower() in low for hint in EXCLUDE_IMAGE_SUBSTRINGS)
+
+
 def text_summary_from_html(soup: BeautifulSoup, max_chars: int = 280) -> str:
-    # 본문 후보 컨테이너
     candidates = ["#bo_v_con", ".bo_v_con", "div.view_content", ".viewContent", "#view_content", "article"]
     container = None
     for sel in candidates:
@@ -127,11 +147,9 @@ def fetch_content_media_and_summary(post_url: str) -> dict:
         src = img.get("src") or img.get("data-src") or img.get("data-original") or img.get("data-echo")
         if not src:
             continue
-        images.append(absolutize(post_url, src))
-
-    # 첫 썸네일(사이트 placeholder) 제거: 2장 이상일 때 1장 버림
-    if len(images) >= 2:
-        images = images[1:]
+        full = absolutize(post_url, src)
+        if not is_excluded_image(full):
+            images.append(full)
 
     # direct videos
     video_exts = (".mp4", ".mov", ".webm", ".mkv", ".m4v")
@@ -140,11 +158,11 @@ def fetch_content_media_and_summary(post_url: str) -> dict:
         src = v.get("src")
         if not src:
             continue
-        src = absolutize(post_url, src)
-        if any(src.lower().endswith(ext) for ext in video_exts):
-            videos.append(src)
+        full = absolutize(post_url, src)
+        if any(full.lower().endswith(ext) for ext in video_exts):
+            videos.append(full)
 
-    # iframes (유튜브 등) → 링크로 안내
+    # iframes (e.g., YouTube)
     iframes = []
     for f in container.find_all("iframe"):
         src = f.get("src")
@@ -156,6 +174,7 @@ def fetch_content_media_and_summary(post_url: str) -> dict:
     videos = list(dict.fromkeys(videos))
     iframes = list(dict.fromkeys(iframes))
 
+    # title
     title = None
     ogt = soup.find("meta", property="og:title")
     if ogt and ogt.get("content"):
@@ -166,9 +185,10 @@ def fetch_content_media_and_summary(post_url: str) -> dict:
     return {"images": images, "videos": videos, "iframes": iframes, "summary": summary, "title_override": title}
 
 
-def tg_post(method: str, data: dict):
+# --- Telegram ---
+def tg_post(method: str, data: dict, files=None):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/{method}"
-    r = requests.post(url, data=data, timeout=20)
+    r = requests.post(url, data=data, files=files, timeout=60)
     try:
         j = r.json()
     except Exception:
@@ -189,23 +209,11 @@ def tg_send_text(text: str):
     )
 
 
-def tg_send_media_group(media_items: list[dict]):
-    return tg_post(
-        "sendMediaGroup",
-        {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "media": json.dumps(media_items, ensure_ascii=False),
-        },
-    )
-
-
-def build_caption(title: str, url: str, summary: str, batch_idx: int | None, total_batches: int | None) -> str:
-    prefix = f"📌 <b>{title}</b>"
-    if batch_idx is not None and total_batches is not None and total_batches > 1:
-        prefix += f"  ({batch_idx}/{total_batches})"
-    body = f"\n{summary}" if summary else ""
-    suffix = f"\n{url}"
-    caption = f"{prefix}{body}{suffix}"
+def build_caption(title: str, url: str, summary: str) -> str:
+    caption = f"📌 <b>{title}</b>"
+    if summary:
+        caption += f"\n{summary}"
+    caption += f"\n{url}"
     if len(caption) > 900:
         caption = caption[:897] + "…"
     return caption
@@ -223,9 +231,7 @@ def fetch_hgall_yakhu_list() -> list[dict]:
     posts = []
     for a in soup.find_all("a", href=True):
         href = a["href"].strip()
-        if not href:
-            continue
-        if "wr_id=" not in href:
+        if not href or "wr_id=" not in href:
             continue
 
         m = re.search(r"wr_id=(\d+)", href)
@@ -240,7 +246,7 @@ def fetch_hgall_yakhu_list() -> list[dict]:
             bo_table = TARGET_BOARD
 
         if bo_table != TARGET_BOARD:
-            continue  # yakhu 전용
+            continue  # yakhu only
 
         title = a.get_text(strip=True)
         if not title:
@@ -249,12 +255,43 @@ def fetch_hgall_yakhu_list() -> list[dict]:
         full_url = absolutize(HGALL_URL, href)
         posts.append({"bo_table": bo_table, "wr_id": wr_id, "title": title, "url": full_url})
 
-    # dedup by (bo, id) and sort desc
+    # dedup & sort
     posts = sorted({(p["bo_table"], p["wr_id"]): p for p in posts}.values(),
                    key=lambda x: x["wr_id"], reverse=True)
 
     print(f"[debug] 약후 리스트 수집 완료: {len(posts)}개")
     return posts
+
+
+def download_bytes(url: str, referer: str) -> bytes | None:
+    try:
+        headers = {"Referer": referer}
+        resp = SESSION.get(url, headers=headers, timeout=TIMEOUT)
+        if resp.status_code == 200 and resp.content:
+            return resp.content
+    except Exception as e:
+        print(f"[warn] download failed: {url} err={e}")
+    return None
+
+
+def send_photo_url_or_file(url: str, caption: str | None, referer_for_download: str):
+    if DOWNLOAD_AND_UPLOAD:
+        data = download_bytes(url, referer_for_download)
+        if data:
+            files = {"photo": ("image.jpg", BytesIO(data))}
+            return tg_post("sendPhoto", {"chat_id": TELEGRAM_CHAT_ID, "caption": caption or "", "parse_mode": "HTML"}, files=files)
+    # fallback: URL 방식
+    return tg_post("sendPhoto", {"chat_id": TELEGRAM_CHAT_ID, "photo": url, "caption": caption or "", "parse_mode": "HTML"})
+
+
+def send_video_url_or_file(url: str, caption: str | None, referer_for_download: str):
+    if DOWNLOAD_AND_UPLOAD:
+        data = download_bytes(url, referer_for_download)
+        if data:
+            files = {"video": ("video.mp4", BytesIO(data))}
+            return tg_post("sendVideo", {"chat_id": TELEGRAM_CHAT_ID, "caption": caption or "", "parse_mode": "HTML"}, files=files)
+    # fallback: URL 방식
+    return tg_post("sendVideo", {"chat_id": TELEGRAM_CHAT_ID, "video": url, "caption": caption or "", "parse_mode": "HTML"})
 
 
 def process():
@@ -275,7 +312,6 @@ def process():
             p["_seen_key"] = key
             to_send.append(p)
 
-    # 강제 전송(테스트용)
     if FORCE_SEND_LATEST and not to_send and posts:
         latest = sorted(posts, key=lambda x: x["wr_id"], reverse=True)[0]
         latest["_seen_key"] = f"etoland:{latest['bo_table']}:{latest['wr_id']}"
@@ -300,48 +336,27 @@ def process():
         iframes = media["iframes"]
         summary = media["summary"]
 
-        media_urls = images + videos
-        MAX_ITEMS = 10
+        # 1) 본문 요약/링크 먼저 전송
+        caption = build_caption(title, url, summary)
+        tg_send_text(caption)
+        time.sleep(1)
 
-        if not media_urls:
-            caption = build_caption(title, url, summary, None, None)
-            tg_send_text(caption)
-            sent_keys.append(p["_seen_key"])
-            time.sleep(1)
-            continue
-
-        total = len(media_urls)
-        total_batches = (total + MAX_ITEMS - 1) // MAX_ITEMS
-
-        for batch_idx in range(total_batches):
-            start = batch_idx * MAX_ITEMS
-            end = min(start + MAX_ITEMS, total)
-            chunk = media_urls[start:end]
-
-            media_items = []
-            for i, murl in enumerate(chunk):
-                typ = "video" if any(
-                    murl.lower().endswith(ext) for ext in (".mp4", ".mov", ".webm", ".mkv", ".m4v")
-                ) else "photo"
-                item = {"type": typ, "media": murl}
-                if batch_idx == 0 and i == 0:
-                    item["caption"] = build_caption(title, url, summary, batch_idx + 1, total_batches)
-                    item["parse_mode"] = "HTML"
-                elif i == 0 and total_batches > 1:
-                    item["caption"] = f"({batch_idx + 1}/{total_batches}) 계속"
-                media_items.append(item)
-
-            r, j = tg_send_media_group(media_items)
-            if not j.get("ok"):
-                tg_send_text(build_caption(title, url, summary, batch_idx + 1, total_batches))
+        # 2) 이미지/비디오 개별 전송 (묶음X)
+        for idx, img in enumerate(images):
+            send_photo_url_or_file(img, None, url)
             time.sleep(1)
 
+        for idx, vid in enumerate(videos):
+            send_video_url_or_file(vid, None, url)
+            time.sleep(1)
+
+        # 3) iframe 링크가 있으면 별도 안내
         if iframes:
             lines = "\n".join(iframes[:5])
             tg_send_text("\U0001F3A5 임베드 동영상 링크:\n" + lines)
+            time.sleep(1)
 
         sent_keys.append(p["_seen_key"])
-        time.sleep(1)
 
     append_seen(sent_keys)
     print(f"[info] appended {len(sent_keys)} keys")
