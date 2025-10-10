@@ -66,7 +66,7 @@ def absolutize(base: str, url: str) -> str:
     return urljoin(base, url)
 
 LINK_RE = re.compile(
-    r"(?:^|/)(?:board\.php|plugin/mobile/board\.php)\?[^"'>]*\bbo_table=([a-z0-9_]+)\b[^"'>]*\bwr_id=(\d+)\b",
+    r"(?:^|/)(?:board\.php|plugin/mobile/board\.php)\?[^\"'>]*bo_table=([a-z0-9_]+)[^\"'>]*wr_id=(\d+)",
     re.I,
 )
 
