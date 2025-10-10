@@ -2,7 +2,7 @@ name: Etoland Yakhu Only
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/5 * * * *"  # 5분마다
   workflow_dispatch:
 
 permissions:
@@ -37,7 +37,7 @@ jobs:
       - name: Install deps
         run: pip install -r requirements.txt
 
-      # ✅ Self-test (개행/백슬래시 없이 --get 사용, 길이 체크 포함)
+      # ✅ Telegram self-test (개행 없이 --get 사용)
       - name: Telegram self-test
         shell: bash
         env:
@@ -59,7 +59,9 @@ jobs:
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          ENABLE_HEARTBEAT: "1"
+          ENABLE_HEARTBEAT: "1"       # 시작 알림
+          FORCE_SEND_LATEST: "0"      # 테스트 강제전송 원하면 "1"
+          RESET_SEEN: "0"             # 상태 초기화 1회만 "1"
         run: python -u main.py
 
       - name: Commit state if changed
