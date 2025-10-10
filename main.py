@@ -12,21 +12,24 @@ from bs4 import BeautifulSoup
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# ========= Target (STRICT) =========
-# Only this listing page is scanned.
+# ========= Target (STRICT to Yakhu) =========
 HGALL_URL = "https://www.etoland.co.kr/bbs/hgall.php?bo_table=etohumor07&sca=%BE%E0%C8%C4"
 TARGET_BOARD = "etohumor07"
 
-# ========= State / Heartbeat =========
+# ========= State / Debug =========
 SEEN_FILE = os.getenv("SEEN_SET_FILE", "state/seen_ids.txt")  # etoland:etohumor07:wr_id
 ENABLE_HEARTBEAT = os.getenv("ENABLE_HEARTBEAT", "0").strip() == "1"
 HEARTBEAT_TEXT = os.getenv("HEARTBEAT_TEXT", "🧪 Heartbeat: bot alive.")
+
+# Debug helpers
+FORCE_SEND_LATEST = os.getenv("FORCE_SEND_LATEST", "0").strip() == "1"
+RESET_SEEN = os.getenv("RESET_SEEN", "0").strip() == "1"
 
 # ========= HTTP =========
 SESSION = requests.Session()
 SESSION.headers.update(
     {
-        "User-Agent": "Mozilla/5.0 (compatible; EtolandYakhuOnly/1.3; +https://github.com/your/repo)",
+        "User-Agent": "Mozilla/5.0 (compatible; EtolandYakhuOnly/1.4; +https://github.com/your/repo)",
         "Accept-Language": "ko,ko-KR;q=0.9,en;q=0.8",
         "Referer": "https://www.etoland.co.kr/",
         "Connection": "close",
@@ -41,6 +44,9 @@ def ensure_state_dir() -> None:
 
 def load_seen() -> set:
     ensure_state_dir()
+    if RESET_SEEN:
+        print("[debug] RESET_SEEN=1 → seen set ignored this run")
+        return set()
     s = set()
     p = pathlib.Path(SEEN_FILE)
     if p.exists():
@@ -78,38 +84,8 @@ def absolutize(base: str, url: str) -> str:
     return urljoin(base, url)
 
 
-# --- STRICT: extract wr_id + verify bo_table ---
-LINK_RE = re.compile(
-    r"(?:^|/)(?:board\.php|plugin/mobile/board\.php)\?[^\"'>]*bo_table=([a-z0-9_]+)[^\"'>]*wr_id=(\d+)",
-    re.I,
-)
-
-
-def extract_bo_and_id(href: str):
-    if not href:
-        return None, None
-    m = LINK_RE.search(href)
-    if m:
-        bo = m.group(1).lower()
-        try:
-            wr = int(m.group(2))
-        except Exception:
-            wr = None
-        return bo, wr
-    # fallback: strict query parsing only if board.php path
-    try:
-        u = urlparse(href)
-        if not (u.path.endswith("board.php") or u.path.endswith("plugin/mobile/board.php")):
-            return None, None
-        q = parse_qs(u.query)
-        bo = (q.get("bo_table", [""])[0] or "").lower()
-        wr = int(q.get("wr_id", ["0"])[0])
-        return bo or None, wr or None
-    except Exception:
-        return None, None
-
-
 def text_summary_from_html(soup: BeautifulSoup, max_chars: int = 280) -> str:
+    # 본문 후보 컨테이너
     candidates = ["#bo_v_con", ".bo_v_con", "div.view_content", ".viewContent", "#view_content", "article"]
     container = None
     for sel in candidates:
@@ -145,6 +121,7 @@ def fetch_content_media_and_summary(post_url: str) -> dict:
     if container is None:
         container = soup
 
+    # images
     images = []
     for img in container.find_all("img"):
         src = img.get("src") or img.get("data-src") or img.get("data-original") or img.get("data-echo")
@@ -152,10 +129,11 @@ def fetch_content_media_and_summary(post_url: str) -> dict:
             continue
         images.append(absolutize(post_url, src))
 
-    # --- Skip the first image (site placeholder/thumbnail) when there are 2+ images ---
+    # 첫 썸네일(사이트 placeholder) 제거: 2장 이상일 때 1장 버림
     if len(images) >= 2:
         images = images[1:]
 
+    # direct videos
     video_exts = (".mp4", ".mov", ".webm", ".mkv", ".m4v")
     videos = []
     for v in container.find_all(["video", "source"]):
@@ -166,12 +144,14 @@ def fetch_content_media_and_summary(post_url: str) -> dict:
         if any(src.lower().endswith(ext) for ext in video_exts):
             videos.append(src)
 
+    # iframes (유튜브 등) → 링크로 안내
     iframes = []
     for f in container.find_all("iframe"):
         src = f.get("src")
         if src:
             iframes.append(absolutize(post_url, src))
 
+    # dedup
     images = list(dict.fromkeys(images))
     videos = list(dict.fromkeys(videos))
     iframes = list(dict.fromkeys(iframes))
@@ -186,7 +166,6 @@ def fetch_content_media_and_summary(post_url: str) -> dict:
     return {"images": images, "videos": videos, "iframes": iframes, "summary": summary, "title_override": title}
 
 
-# --- Telegram ---
 def tg_post(method: str, data: dict):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/{method}"
     r = requests.post(url, data=data, timeout=20)
@@ -232,34 +211,50 @@ def build_caption(title: str, url: str, summary: str, batch_idx: int | None, tot
     return caption
 
 
-# --- STRICT listing parse ---
 def fetch_hgall_yakhu_list() -> list[dict]:
+    """
+    약후 리스트 페이지에서 wr_id 링크를 느슨하게 수집.
+    board.php가 아니어도 wr_id=만 있으면 인정, bo_table 없으면 TARGET_BOARD로 강제.
+    """
     r = SESSION.get(HGALL_URL, timeout=TIMEOUT)
     html = get_encoding_safe_text(r)
     soup = BeautifulSoup(html, "html.parser")
 
-    # Prefer the list table/grid container to avoid unrelated anchors
-    containers = soup.select(".gall_list, .list, #list, .tbl_wrap, .tbl_head01")
-    scope = containers[0] if containers else soup
-
-    posts = {}
-    for a in scope.find_all("a", href=True):
+    posts = []
+    for a in soup.find_all("a", href=True):
         href = a["href"].strip()
-        # Strictly accept only board.php links containing the target board
-        if "board.php" not in href:
+        if not href:
             continue
-        bo, wr = extract_bo_and_id(href)
-        if bo != TARGET_BOARD or not wr:
+        if "wr_id=" not in href:
             continue
-        title = a.get_text(strip=True) or f"[{bo}] 글번호 {wr}"
-        link = absolutize(HGALL_URL, href)
-        key = (bo, wr)
-        if key not in posts or (title and len(title) > len(posts[key]["title"])):
-            posts[key] = {"bo_table": bo, "wr_id": wr, "title": title, "url": link}
 
-    res = sorted(posts.values(), key=lambda x: x["wr_id"], reverse=True)
-    print(f"[debug] hgall(약후 strict) list fetched: {len(res)} items")
-    return res
+        m = re.search(r"wr_id=(\d+)", href)
+        if not m:
+            continue
+        wr_id = int(m.group(1))
+
+        if "bo_table=" in href:
+            bm = re.search(r"bo_table=([a-z0-9_]+)", href, re.I)
+            bo_table = bm.group(1).lower() if bm else TARGET_BOARD
+        else:
+            bo_table = TARGET_BOARD
+
+        if bo_table != TARGET_BOARD:
+            continue  # yakhu 전용
+
+        title = a.get_text(strip=True)
+        if not title:
+            continue
+
+        full_url = absolutize(HGALL_URL, href)
+        posts.append({"bo_table": bo_table, "wr_id": wr_id, "title": title, "url": full_url})
+
+    # dedup by (bo, id) and sort desc
+    posts = sorted({(p["bo_table"], p["wr_id"]): p for p in posts}.values(),
+                   key=lambda x: x["wr_id"], reverse=True)
+
+    print(f"[debug] 약후 리스트 수집 완료: {len(posts)}개")
+    return posts
 
 
 def process():
@@ -279,6 +274,13 @@ def process():
         if key not in seen:
             p["_seen_key"] = key
             to_send.append(p)
+
+    # 강제 전송(테스트용)
+    if FORCE_SEND_LATEST and not to_send and posts:
+        latest = sorted(posts, key=lambda x: x["wr_id"], reverse=True)[0]
+        latest["_seen_key"] = f"etoland:{latest['bo_table']}:{latest['wr_id']}"
+        to_send = [latest]
+        print("[debug] FORCE_SEND_LATEST=1 → most recent 1 post forced to send")
 
     if not to_send:
         print("[info] no new posts")
