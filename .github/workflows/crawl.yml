@@ -63,7 +63,7 @@ jobs:
           # ---- 옵션(필요 시 on/off) ----
           ENABLE_HEARTBEAT: "1"              # 시작 알림
           DOWNLOAD_AND_UPLOAD: "1"           # 핫링크 회피(권장)
-          TRACE_IMAGE_DEBUG: "0"             # 이미지 후보/필터 결과 로그/미리보기
+          TRACE_IMAGE_DEBUG: "1"             # 이미지 후보/필터 결과 로그/미리보기
           EXCLUDE_IMAGE_SUBSTRINGS: "link.php?,/logo/,/banner/,/ads/,/noimage,/favicon,/thumb/,/placeholder/"
 
           # 테스트에만 잠깐 켜기
