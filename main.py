@@ -25,17 +25,21 @@ FORCE_SEND_LATEST = os.getenv("FORCE_SEND_LATEST", "0").strip() == "1"
 RESET_SEEN = os.getenv("RESET_SEEN", "0").strip() == "1"
 
 # ========= Behavior toggles =========
-# 1) 핫링크 회피: 이미지를 직접 내려받아 파일로 업로드(권장)
+# 핫링크 회피: 이미지를 직접 내려받아 파일 업로드(권장)
 DOWNLOAD_AND_UPLOAD = os.getenv("DOWNLOAD_AND_UPLOAD", "0").strip() == "1"
-# 2) 제외할 이미지 URL 조각들(콤마 구분)
+# 이미지 후보/필터 결과를 로그/텔레그램으로 추적
+TRACE_IMAGE_DEBUG = os.getenv("TRACE_IMAGE_DEBUG", "0").strip() == "1"
+
+# 제외할 이미지 URL 조각(콤마 구분 추가 가능)
 EXCLUDE_IMAGE_SUBSTRINGS = [
-    # 기본 제외(사이트 썸네일/플레이스홀더/로고류로 의심되는 패턴)
-    "link.php?",
+    "link.php?",   # 에토랜드 링크 프록시/썸네일로 자주 등장
     "/logo/",
     "/banner/",
     "/ads/",
     "/noimage",
     "/favicon",
+    "/thumb/",     # 썸네일 경로가 종종 포함
+    "/placeholder/",
 ]
 _extra = os.getenv("EXCLUDE_IMAGE_SUBSTRINGS", "").strip()
 if _extra:
@@ -141,15 +145,35 @@ def fetch_content_media_and_summary(post_url: str) -> dict:
     if container is None:
         container = soup
 
-    # images
-    images = []
+    # ---- collect images (raw) ----
+    all_imgs = []
     for img in container.find_all("img"):
         src = img.get("src") or img.get("data-src") or img.get("data-original") or img.get("data-echo")
         if not src:
             continue
-        full = absolutize(post_url, src)
-        if not is_excluded_image(full):
-            images.append(full)
+        all_imgs.append(absolutize(post_url, src))
+
+    # (디버그) 필터 전 목록
+    if TRACE_IMAGE_DEBUG:
+        print("[trace] before-filter:", all_imgs[:15])
+
+    # 필터 적용
+    images = [u for u in all_imgs if not is_excluded_image(u)]
+
+    # (보강) <a href="*.jpg|png|gif|webp"> 링크도 이미지로 취급
+    if not images:
+        for a in container.find_all("a", href=True):
+            href = a["href"].strip()
+            if not href:
+                continue
+            full = absolutize(post_url, href)
+            if re.search(r"\.(jpg|jpeg|png|gif|webp)(?:\?|$)", full, re.I):
+                if not is_excluded_image(full):
+                    images.append(full)
+
+    # (디버그) 필터 후 목록
+    if TRACE_IMAGE_DEBUG:
+        print("[trace] after-filter :", images[:15])
 
     # direct videos
     video_exts = (".mp4", ".mov", ".webm", ".mkv", ".m4v")
@@ -181,6 +205,14 @@ def fetch_content_media_and_summary(post_url: str) -> dict:
         title = ogt.get("content").strip()
     if not title and soup.title and soup.title.string:
         title = soup.title.string.strip()
+
+    # (옵션) 텔레그램으로 후보/결과 미리보기
+    if TRACE_IMAGE_DEBUG:
+        try:
+            preview = "\n".join(images[:10]) or "(no images)"
+            tg_send_text("🔍 image candidates:\n" + preview)
+        except Exception as e:
+            print("[trace] send preview failed:", e)
 
     return {"images": images, "videos": videos, "iframes": iframes, "summary": summary, "title_override": title}
 
@@ -221,7 +253,7 @@ def build_caption(title: str, url: str, summary: str) -> str:
 
 def fetch_hgall_yakhu_list() -> list[dict]:
     """
-    약후 리스트 페이지에서 wr_id 링크를 느슨하게 수집.
+    약후 리스트에서 wr_id 링크를 느슨하게 수집.
     board.php가 아니어도 wr_id=만 있으면 인정, bo_table 없으면 TARGET_BOARD로 강제.
     """
     r = SESSION.get(HGALL_URL, timeout=TIMEOUT)
@@ -265,7 +297,7 @@ def fetch_hgall_yakhu_list() -> list[dict]:
 
 def download_bytes(url: str, referer: str) -> bytes | None:
     try:
-        headers = {"Referer": referer}
+        headers = {"Referer": referer}  # 원본이 리퍼러 요구할 수 있음
         resp = SESSION.get(url, headers=headers, timeout=TIMEOUT)
         if resp.status_code == 200 and resp.content:
             return resp.content
@@ -280,7 +312,7 @@ def send_photo_url_or_file(url: str, caption: str | None, referer_for_download: 
         if data:
             files = {"photo": ("image.jpg", BytesIO(data))}
             return tg_post("sendPhoto", {"chat_id": TELEGRAM_CHAT_ID, "caption": caption or "", "parse_mode": "HTML"}, files=files)
-    # fallback: URL 방식
+    # fallback: URL 전송
     return tg_post("sendPhoto", {"chat_id": TELEGRAM_CHAT_ID, "photo": url, "caption": caption or "", "parse_mode": "HTML"})
 
 
@@ -290,7 +322,7 @@ def send_video_url_or_file(url: str, caption: str | None, referer_for_download: 
         if data:
             files = {"video": ("video.mp4", BytesIO(data))}
             return tg_post("sendVideo", {"chat_id": TELEGRAM_CHAT_ID, "caption": caption or "", "parse_mode": "HTML"}, files=files)
-    # fallback: URL 방식
+    # fallback: URL 전송
     return tg_post("sendVideo", {"chat_id": TELEGRAM_CHAT_ID, "video": url, "caption": caption or "", "parse_mode": "HTML"})
 
 
@@ -302,6 +334,7 @@ def process():
         tg_send_text(HEARTBEAT_TEXT)
 
     posts = fetch_hgall_yakhu_list()
+    print("[debug] fetched posts (top5):", [(p["wr_id"], p["title"][:20]) for p in posts[:5]])
     posts.sort(key=lambda x: x["wr_id"])  # oldest first
 
     seen = load_seen()
@@ -342,11 +375,13 @@ def process():
         time.sleep(1)
 
         # 2) 이미지/비디오 개별 전송 (묶음X)
-        for idx, img in enumerate(images):
+        print(f"[debug] media counts for wr_id={p['wr_id']}: images={len(images)} videos={len(videos)} iframes={len(iframes)}")
+
+        for img in images:
             send_photo_url_or_file(img, None, url)
             time.sleep(1)
 
-        for idx, vid in enumerate(videos):
+        for vid in videos:
             send_video_url_or_file(vid, None, url)
             time.sleep(1)
 
