@@ -2,7 +2,7 @@ name: Etoland Yakhu Only
 
 on:
   schedule:
-    - cron: "*/5 * * * *"  # 5분마다
+    - cron: "*/5 * * * *"   # 5분마다
   workflow_dispatch:
 
 permissions:
@@ -37,7 +37,7 @@ jobs:
       - name: Install deps
         run: pip install -r requirements.txt
 
-      # ✅ Telegram self-test (개행 없이 --get 사용)
+      # ✅ Telegram self-test
       - name: Telegram self-test
         shell: bash
         env:
@@ -59,11 +59,16 @@ jobs:
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          ENABLE_HEARTBEAT: "1"       # 시작 알림
-          DOWNLOAD_AND_UPLOAD: "1"            # ← 핫링크 회피 (권장)
-          EXCLUDE_IMAGE_SUBSTRINGS: "link.php?,/logo/,/banner/"  # ← 필요시 추가
-          FORCE_SEND_LATEST: "0"      # 테스트 강제전송 원하면 "1"
-          RESET_SEEN: "0"             # 상태 초기화 1회만 "1"
+
+          # ---- 옵션(필요 시 on/off) ----
+          ENABLE_HEARTBEAT: "1"              # 시작 알림
+          DOWNLOAD_AND_UPLOAD: "1"           # 핫링크 회피(권장)
+          TRACE_IMAGE_DEBUG: "0"             # 이미지 후보/필터 결과 로그/미리보기
+          EXCLUDE_IMAGE_SUBSTRINGS: "link.php?,/logo/,/banner/,/ads/,/noimage,/favicon,/thumb/,/placeholder/"
+
+          # 테스트에만 잠깐 켜기
+          FORCE_SEND_LATEST: "0"             # 최신 1건 강제 전송
+          RESET_SEEN: "0"                    # seen 초기화
         run: python -u main.py
 
       - name: Commit state if changed
