@@ -774,3 +774,5 @@ etoland:etohumor07:2184444
 etoland:etohumor07:2188148
 etoland:etohumor07:2188155
 etoland:etohumor07:2188161
+etoland:etohumor07:2182727
+etoland:etohumor07:2188251
