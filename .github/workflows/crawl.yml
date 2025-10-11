@@ -67,8 +67,8 @@ jobs:
           EXCLUDE_IMAGE_SUBSTRINGS: "link.php?,/logo/,/banner/,/ads/,/noimage,/favicon,/thumb/,/placeholder/,/img/icon_link.gif,icon_link.gif"
 
           # 테스트에만 잠깐 켜기
-          FORCE_SEND_LATEST: "0"             # 최신 1건 강제 전송
-          RESET_SEEN: "0"                    # seen 초기화
+          FORCE_SEND_LATEST: "1"             # 최신 1건 강제 전송
+          RESET_SEEN: "1"                    # seen 초기화
         run: python -u main.py
 
       - name: Commit state if changed
