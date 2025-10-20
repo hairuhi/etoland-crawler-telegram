@@ -1615,3 +1615,5 @@ etoland:etohumor07:2281361
 etoland:etohumor07:2273222
 etoland:etohumor07:2278454
 etoland:etohumor07:2278215
+etoland:etohumor07:2272721
+etoland:etohumor07:2274899
