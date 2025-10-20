@@ -1606,3 +1606,5 @@ etoland:etohumor07:2280800
 etoland:etohumor07:2280809
 etoland:etohumor07:2280870
 etoland:etohumor07:2280888
+etoland:etohumor07:2275282
+etoland:etohumor07:2275880
