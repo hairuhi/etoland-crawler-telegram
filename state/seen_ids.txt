@@ -1936,3 +1936,5 @@ etoland:etohumor07:2310602
 etoland:etohumor07:2310843
 etoland:etohumor07:2312293
 etoland:etohumor07:2316061
+etoland:etohumor07:2313999
+etoland:etohumor07:2316145
