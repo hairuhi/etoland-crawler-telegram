@@ -1964,3 +1964,5 @@ etoland:etohumor07:2318223
 etoland:etohumor07:2311915
 etoland:etohumor07:2318896
 etoland:etohumor07:2312866
+etoland:etohumor07:2319347
+etoland:etohumor07:2319369
