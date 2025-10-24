@@ -1957,3 +1957,6 @@ etoland:etohumor07:2317604
 etoland:etohumor07:2310759
 etoland:etohumor07:2313775
 etoland:etohumor07:2317715
+etoland:etohumor07:2318150
+etoland:etohumor07:2318166
+etoland:etohumor07:2318174
