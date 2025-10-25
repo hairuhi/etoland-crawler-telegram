@@ -2016,3 +2016,5 @@ etoland:etohumor07:2323434
 etoland:etohumor07:2318326
 etoland:etohumor07:2323615
 etoland:etohumor07:2323618
+etoland:etohumor07:2321898
+etoland:etohumor07:2323705
