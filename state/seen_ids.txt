@@ -2480,3 +2480,5 @@ etoland:etohumor07:2364131
 etoland:etohumor07:2364137
 etoland:etohumor07:2364144
 etoland:etohumor07:2364316
+etoland:etohumor07:2364366
+etoland:etohumor07:2364368
