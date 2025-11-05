@@ -3042,3 +3042,5 @@ etoland:etohumor07:2405881
 etoland:etohumor07:2405922
 etoland:etohumor07:2405956
 etoland:etohumor07:2406224
+etoland:etohumor07:2398912
+etoland:etohumor07:2402061
