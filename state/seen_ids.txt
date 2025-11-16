@@ -4097,3 +4097,8 @@ etoland:etohumor07:2483753
 etoland:etohumor07:2485550
 etoland:etohumor07:2485583
 etoland:etohumor07:2485585
+etoland:etohumor07:2485730
+etoland:etohumor07:2485745
+etoland:etohumor07:2485758
+etoland:etohumor07:2485771
+etoland:etohumor07:2485794
