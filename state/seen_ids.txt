@@ -8581,3 +8581,5 @@ etoland:etohumor07:2833413
 etoland:etohumor07:2834434
 etoland:etohumor07:2835698
 etoland:etohumor07:2834876
+etoland:etohumor07:2835507
+etoland:etohumor07:2836795
