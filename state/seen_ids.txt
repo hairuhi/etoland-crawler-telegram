@@ -12929,3 +12929,5 @@ etoland:etohumor07:2971428
 etoland:etohumor07:2971858
 etoland:etohumor07:2971873
 etoland:etohumor07:2971874
+etoland:etohumor07:2972155
+etoland:etohumor07:2972213
