@@ -14229,3 +14229,5 @@ etoland:etohumor07:3004506
 etoland:etohumor07:3005009
 etoland:etohumor07:3005283
 etoland:etohumor07:3005383
+etoland:etohumor07:3001390
+etoland:etohumor07:3005719
